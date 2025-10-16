@@ -1,0 +1,8 @@
+yt-dlp==2025.9.26
+opencv-python==4.10.0.84
+deepface==0.0.93
+youtube-search-python==1.6.6
+tensorflow==2.20.0
+numpy==1.26.4
+tf-keras==2.20.1
+httpx==0.27.2
