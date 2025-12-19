@@ -46,6 +46,8 @@ import numpy as np
 from deepface import DeepFace
 from youtubesearchpython import VideosSearch
 import time
+import gc
+import pandas as pd
 
 # ======================= CONFIGURAÇÕES =======================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -71,7 +73,8 @@ FACES_DIR = os.path.join(SCRIPT_DIR, "faces")          # pasta principal de face
 REDHEAD_DIR = os.path.join(FACES_DIR, "redhead")       # rostos ruivos (dataset alvo)
 NON_REDHEAD_DIR = os.path.join(FACES_DIR, "non_redhead") # opcional: rostos não-ruivos
 PROCESSED_LINKS_FILE = os.path.join(SCRIPT_DIR, "processed_links.txt")
-ANNOTATION_FILE = os.path.join(SCRIPT_DIR, "annotations.csv")
+ANNOTATION_FILE_RED = os.path.join(SCRIPT_DIR, "annotations_red.csv")   # CSV de pessoas ruivas 
+ANNOTATION_FILE_NOT_RED = os.path.join(SCRIPT_DIR, "annotations_not_red.csv")   # CSV de pessoas não ruivas
 
 # Extração de frames
 FRAME_INTERVAL = 10           # analisa 1 frame a cada N frames (reduz processamento)
@@ -89,7 +92,7 @@ MIN_MEAN_SAT = 50             # saturação média mínima na região (descarta 
 MIN_MEAN_VAL = 50             # brilho médio mínimo na região (descarta sombras profundas)
 
 # Salvar non-ruivos também?
-SAVE_NON_REDHEAD = False
+SAVE_NON_REDHEAD = True
 
 # DeepFace config
 DEEPFACE_ENFORCE = False     # enforce_detection para DeepFace (False evita lançar erros se pequena face)
@@ -107,10 +110,17 @@ def setup_environment():
     if SAVE_NON_REDHEAD:
         os.makedirs(NON_REDHEAD_DIR, exist_ok=True)
     # CSV de anotações
-    if not os.path.exists(ANNOTATION_FILE):
-        with open(ANNOTATION_FILE, "w", newline='', encoding='utf-8') as f:
+    if not os.path.exists(ANNOTATION_FILE_RED):
+        with open(ANNOTATION_FILE_RED, "w", newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(["filename", "video_id", "race", "age", "gender", "emotion", "timestamp_s", "hair_color", "source_video"])
+
+    # CSV de anotações de pessoas não ruivas 
+    if not os.path.exists(ANNOTATION_FILE_NOT_RED):
+        with open(ANNOTATION_FILE_NOT_RED, "w", newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["filename", "video_id", "race", "age", "gender", "emotion", "timestamp_s", "hair_color", "source_video"])
+
     # processed links
     if not os.path.exists(PROCESSED_LINKS_FILE):
         open(PROCESSED_LINKS_FILE, "w", encoding='utf-8').close()
@@ -177,6 +187,30 @@ def get_next_image_index(output_dir):
             indices.append(int(name))
     return max(indices, default=0) + 1
 
+def lerColunaRace(caminho):
+    # Lendo a coluna race do .csv
+    try:
+        # Abre o arquivo
+        arquivo = pd.read_csv(caminho)
+        if 'race' in arquivo.columns:
+            # Retorna Lista de todos os elementos da coluna
+            return arquivo['race'].astype(str).tolist()
+        else:
+            print("Coluna 'race' não encontrada")
+
+    except FileNotFoundError:
+        print("Erro: arquivo não encontrado.")
+    except Exception as e:
+        print(f"Ocorreu um erro :{e}")
+
+def confusionMatrix():
+    # Lendo a coluna race do .csv de pessoas ruivas
+    listaRed=lerColunaRace(ANNOTATION_FILE_RED)
+
+    # Lendo a coluna race do .csv de pessoas não ruivas
+    listaNotRed=lerColunaRace(ANNOTATION_FILE_NOT_RED)
+
+    # TInha que terminar o código ainda, mas percebi que não vai me ajudar 
 # ------------------ CLASSIFICADOR RUIVO (HSV multirregional) ------------------
 def is_redhead(image_bgr, face_coords):
     """
@@ -275,7 +309,8 @@ def extract_and_classify_faces(video_path, video_id, output_dir, interval_frames
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     max_frames = int(fps * max_seconds)
     saved_faces = 0
-    img_index = get_next_image_index(REDHEAD_DIR)
+    img_index_red = get_next_image_index(REDHEAD_DIR)
+    img_index_not_red = get_next_image_index(NON_REDHEAD_DIR)
 
     frame_count = 0
     while True:
@@ -326,7 +361,7 @@ def extract_and_classify_faces(video_path, video_id, output_dir, interval_frames
                     if face_crop is None or face_crop.size == 0:
                         continue
 
-                    filename = f"{img_index:05d}.jpg"
+                    filename = f"{img_index_red:05d}.jpg"
                     out_path = os.path.join(REDHEAD_DIR, filename)
                     cv2.imwrite(out_path, face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), IMAGE_QUALITY])
 
@@ -356,12 +391,12 @@ def extract_and_classify_faces(video_path, video_id, output_dir, interval_frames
                     emotion = res.get('dominant_emotion', '')
 
                     # gravar anotação
-                    with open(ANNOTATION_FILE, "a", newline='', encoding='utf-8') as f:
+                    with open(ANNOTATION_FILE_RED, "a", newline='', encoding='utf-8') as f:
                         writer = csv.writer(f)
                         writer.writerow([filename, video_id, race, age, gender, emotion, f"{timestamp_s:.2f}", "redhead", os.path.basename(video_path)])
 
                     saved_faces += 1
-                    img_index += 1
+                    img_index_red += 1
 
                 else:
                     # opcional: salvar faces não-ruivas para dataset negativo
@@ -372,6 +407,39 @@ def extract_and_classify_faces(video_path, video_id, output_dir, interval_frames
                         filename = f"nr_{int(time.time()*1000)}_{np.random.randint(0,9999):04d}.jpg"
                         out_path = os.path.join(NON_REDHEAD_DIR, filename)
                         cv2.imwrite(out_path, face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), IMAGE_QUALITY])
+
+                        # DeepFace analyze (metadados)
+                        try:
+                            results = DeepFace.analyze(
+                                face_crop,
+                                actions=['race', 'age', 'gender', 'emotion'],
+                                enforce_detection=DEEPFACE_ENFORCE,
+                                detector_backend=DEEPFACE_BACKEND
+                            )
+                            # DeepFace.analyze pode retornar dict ou lista (varia por versão); tratar ambos
+                            if isinstance(results, list) and len(results) > 0:
+                                res = results[0]
+                            elif isinstance(results, dict):
+                                res = results
+                            else:
+                                res = {}
+                        except Exception as e:
+                            # se DeepFace falhar, ainda salvamos a face mas registramos campos vazios
+                            print(f"[DeepFace] erro na análise: {e}")
+                            res = {}
+
+                        race = res.get('dominant_race', '')
+                        age = res.get('age', '')
+                        gender = res.get('gender', '')
+                        emotion = res.get('dominant_emotion', '')
+
+                        # gravar anotação
+                        with open(ANNOTATION_FILE_NOT_RED, "a", newline='', encoding='utf-8') as f:
+                            writer = csv.writer(f)
+                            writer.writerow([filename, video_id, race, age, gender, emotion, f"{timestamp_s:.2f}", "non_redhead", os.path.basename(video_path)])
+
+                        saved_faces += 1
+                        img_index_not_red += 1
 
             # fim loop faces
         except Exception as e:
